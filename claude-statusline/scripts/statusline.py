@@ -167,7 +167,7 @@ def context_segment(data):
     warn_pct = trigger_pct * 0.9
 
     col = C_CTX_OVER if pct >= trigger_pct else (C_CTX_HI if pct >= warn_pct else C_CTX_OK)
-    filled = max(0, min(10, round(pct / 10)))
+    filled = max(0, min(10, int(pct / 10 + 0.5)))
     empty = 10 - filled
     bar = col + "▰" * filled
     if empty:
