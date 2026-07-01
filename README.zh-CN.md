@@ -12,11 +12,9 @@
 
 ## 🖥️ 效果演示
 
-Claude Code 终端底部那一行(颜色在真实终端里实时显示):
+![Claude Statusline 实际效果](docs/statusline-demo.png)
 
-```
-⎇ main | Opus 4.8 | ▰▰▰▰▱▱▱▱▱▱  ctx 42% | ⛬ 1/3
-```
+Claude Code 终端底部那一行——git 分支 · 模型 · 上下文 % 带色条 · 运行中子 agent:
 
 | 段 | 含义 |
 |---|---|

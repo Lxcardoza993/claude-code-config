@@ -12,11 +12,9 @@ A polished status line for Claude Code — **git branch · model · live context
 
 ## 🖥️ Demo
 
-The single line at the bottom of your Claude Code terminal (colors shown live in-terminal):
+![Claude Statusline in action](docs/statusline-demo.png)
 
-```
-⎇ main | Opus 4.8 | ▰▰▰▰▱▱▱▱▱▱  ctx 42% | ⛬ 1/3
-```
+The single line at the bottom of your Claude Code terminal — git branch · model · context % with a color-coded bar · running subagents:
 
 | Segment | Meaning |
 |---|---|
