@@ -1,0 +1,32 @@
+# 工作纪律(全局,所有会话注入)
+
+> 目标:单位时间产出更多开发成果,而非烧更多 token。raw token 受单机 ~2-3B/日 硬顶,追 token 数是错方向,追"单位 token 的有效产出"。
+
+## token 效率
+- 子 agent 必须返回**结构化/精炼数据**,不写给人看的散文——多个子 agent 各回详细结果会吃掉主 context。
+- 脏活(跑测试/拉文档/处理日志/读大文件)委派 Explore/Haiku-tier 子 agent,冗长输出留在子上下文,主循环只回摘要。
+- 主循环只做"综合",不干"读全文件"——读全文件交给子 agent 或 codebase-memory-mcp。
+- 保持 prompt cache 热:会话内连续推进别停 >5 分钟;**别中途切 model/effort/加 MCP**(缓存全失效,下一轮整个前缀 1.25× 重写)。
+
+## 上下文卫生(可控浪费的最大单项)
+- 优先 CLI(gh/aws/gcloud/git)而非 MCP——更省 context;关掉不用的 MCP server。
+- "函数在哪/谁调用/改它影响哪/死代码"先用 codebase-memory-mcp(~500 token)而非 grep+多文件读(~80K)。
+- 专用工作流移进 skills(按需加载,不占基础上下文);本文件保持精简(<200 行)。
+- 切无关任务前 /clear;开长任务前 /compact focus on X。
+- 除了长任务、高难度编程项目不用,其余简单或中等难度的任务主上下文达 40-50% 时主动 /compact 并附保留指令(例:/compact 保留 当前任务计划+已改文件清单+关键决策+未完成测试),别等自动压缩兜底。
+
+## 墙钟压缩(开发更快的真杠杆)
+- 改前先 plan mode(Shift+Tab)探再改,防昂贵返工。
+- 给验证目标(测试用例/预期输出/截图)让 Claude 自检,省往返。
+- 小步快验:写一文件即测;走偏立刻 /rewind 回退。
+- /fork 后台起草测试/方案同时主线继续实现。
+- 并行编排能 pipeline 就别 barrier——barrier 只在需要全部结果做跨项综合/去重/早退时用。
+
+## 并发与吞吐的现实(避免无效堆并发)
+- 本机 Workflow 硬上限 10 并发(12核 WSL2),过 ~10 并发墙钟不再降——瓶颈是后端 TPM 不是旋钮。
+- 堆并发只增 OOM/WSL2 rtnetlink hang 风险,不增产出;要更高并发需多机/云端。
+- 大任务用 ultracode 动态工作流(脚本持有计划、子 agent 隔离脏活),非关键判断别上 max/xhigh 全量审阅。
+
+## 提交纪律
+- 改完代码默认 commit+push 到 GitHub 私库,不用每次问;排除运行时状态文件。
+- force push / 改 workflow 等仍需先问。并发会话共享 .git 会竞态,commit 前重查 git status,并行用 `claude -w`。
