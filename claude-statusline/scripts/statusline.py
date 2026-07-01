@@ -12,9 +12,9 @@ C_DIRTY  = "\033[38;5;214m"  # 橙色:有改动
 C_MODEL  = "\033[38;5;245m"  # 灰色:模型名
 C_AGENT  = "\033[38;5;176m"  # 淡紫:子agent计数
 C_SEP    = "\033[38;5;240m"  # 暗灰:分隔符
-C_CTX_OK = "\033[38;5;78m"   # 绿色:上下文<40%
-C_CTX_HI = "\033[38;5;221m"  # 黄色:上下文40-50%(逼近自动压缩)
-C_CTX_OVER = "\033[38;5;196m" # 红色:上下文>50%(该压缩了)
+C_CTX_OK = "\033[38;5;78m"   # 绿色:离压缩点还远
+C_CTX_HI = "\033[38;5;221m"  # 黄色:达压缩点 90%(逼近自动压缩)
+C_CTX_OVER = "\033[38;5;196m" # 红色:达/超压缩点(该压缩了)
 C_DARK   = "\033[38;5;238m"  # 暗灰:进度条空格
 RESET    = "\033[0m"
 SEP      = f" {C_SEP}|{RESET} "
@@ -126,11 +126,25 @@ def _transcript_context_used(transcript_path):
 
 def context_segment(data):
     """上下文占用百分比。优先吃 CC 自带的 context_window.used_percentage
-    (CC 自己的口径,最准),缺失则解析 transcript 估算了。"""
+    (CC 自己的口径,最准),缺失则解析 transcript 估算。
+    百分比基于模型真实窗口(1M for opus);进度条颜色阈值对齐实际压缩触发点
+    ——CC 触发 = AUTO_COMPACT_WINDOW × PCT_OVERRIDE/100,换算到真实窗口口径
+    (两者分母常不一致:压缩走 300K、显示走 1M),让色变预告压缩。"""
     pct = None
     cw = data.get("context_window")
 
-    # 路径 1:CC 自带 used_percentage(权威)
+    # 真实窗口:优先 CC 给的 context_window_size,否则按模型名兜底(1M for opus)。
+    real_window = None
+    if isinstance(cw, dict):
+        wsz = cw.get("context_window_size")
+        if isinstance(wsz, (int, float)) and wsz > 0:
+            real_window = wsz
+    if real_window is None:
+        m = data.get("model") or {}
+        mid = str(m.get("id") or m.get("display_name") or "").lower()
+        real_window = 1000000 if ("1m" in mid or "opus" in mid) else 200000
+
+    # 路径 1:CC 自带 used_percentage(权威,基于真实窗口)
     if isinstance(cw, dict):
         up = cw.get("used_percentage")
         if isinstance(up, (int, float)):
@@ -140,24 +154,22 @@ def context_segment(data):
     if pct is None:
         used = _transcript_context_used(data.get("transcript_path"))
         if used:
-            window = None
-            if isinstance(cw, dict):
-                wsz = cw.get("context_window_size")
-                if isinstance(wsz, (int, float)) and wsz > 0:
-                    window = wsz
-            if window is None:
-                m = data.get("model") or {}
-                mid = str(m.get("id") or m.get("display_name") or "").lower()
-                window = 1000000 if ("1m" in mid or "opus" in mid) else 200000
-            pct = used * 100.0 / window
+            pct = used * 100.0 / real_window
 
     if pct is None:
         return None
 
-    col = C_CTX_OVER if pct >= 50 else (C_CTX_HI if pct >= 40 else C_CTX_OK)
+    # 压缩触发点占真实窗口的百分比 = 红色阈值;其 90% = 黄色阈值。
+    auto_w = int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or 0) or real_window
+    override = int(os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or 0) or 92
+    auto_w = min(auto_w, real_window)
+    trigger_pct = auto_w * override / 100.0 / real_window * 100.0
+    warn_pct = trigger_pct * 0.9
+
+    col = C_CTX_OVER if pct >= trigger_pct else (C_CTX_HI if pct >= warn_pct else C_CTX_OK)
     filled = max(0, min(10, round(pct / 10)))
     empty = 10 - filled
-    bar = C_CTX_OK + "▰" * filled
+    bar = col + "▰" * filled
     if empty:
         bar += C_DARK + "▱" * empty
     bar += RESET
