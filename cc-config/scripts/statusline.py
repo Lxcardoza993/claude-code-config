@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Claude Code statusLine: 目录 | git 分支(±改动) | 模型名 | 运行中子agent数。
-轻量、无外部依赖(只用 git),stdin 收 JSON,stdout 输出一行。"""
+"""Claude Code statusLine: git 分支(±改动) | 模型名 | 上下文 % + 10格进度条 | 运行中子agent数。
+轻量、纯 stdlib、无外部依赖。stdin 收 JSON,stdout 输出一行。
+可移植:路径走 $CLAUDE_CONFIG_DIR(默认 ~/.claude),不硬编码用户家目录。"""
 import sys, json, os, glob, time, subprocess
 
-C_DIR    = "\033[38;5;39m"   # 青色:目录
+CLAUDE_CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+PROJECTS_ROOT = os.path.join(CLAUDE_CONFIG_DIR, "projects")
+
 C_CLEAN  = "\033[38;5;78m"   # 绿色:干净分支
 C_DIRTY  = "\033[38;5;214m"  # 橙色:有改动
 C_MODEL  = "\033[38;5;245m"  # 灰色:模型名
@@ -16,11 +19,8 @@ C_DARK   = "\033[38;5;238m"  # 暗灰:进度条空格
 RESET    = "\033[0m"
 SEP      = f" {C_SEP}|{RESET} "
 
-# 本脚本固定位于 ~/.claude/statusline.py,据此定位 projects 根目录。
-PROJECTS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "projects")
-# 运行中判据:子agent(无论前台/后台)运行时持续把工具调用追加进自己的 jsonl。
-# jsonl 在此窗口内被改动 = 仍在运行;结束或崩溃后文件不再变化,超过窗口即自动归零。
-# 取舍:窗口太短会漏掉正卡在长工具调用(如构建/测试)的 agent;太长则已结束的 agent 滞留。
+# 子agent运行判据:运行中(前台/后台)持续把工具调用追加进自己的 agent-*.jsonl,
+# 文件在 RUNNING_WINDOW 秒内被改动即视为运行中;结束/崩溃后文件不再增长,自然归零。
 # 90s 兼顾常见停顿(web 抓取、中等 bash)。可按需调整。
 RUNNING_WINDOW = 90
 
@@ -53,16 +53,9 @@ def _mtime(path):
 
 
 def count_running(subagents_dir, now):
-    """该会话当前正在运行的子agent数。
-    判据:子agent(前台或后台)运行时持续把工具调用追加进自己的 agent-*.jsonl;
-    文件在 RUNNING_WINDOW 秒内被改动即视为运行中。结束/崩溃后文件不再增长,自然归零。
-
-    为何不看父 transcript 的 tool_result:后台 agent 的 tool_result 在"启动那一刻"
-    就写入父 transcript(返回 "launched successfully"),并非完成时——用它判完成会把
-    正在跑的后台 agent 误判为已结束。jsonl 改动时间对前台/后台行为一致,是唯一可靠信号。"""
+    """该目录下正在运行的子agent数。递归:workflow 子agent 的 jsonl 落在
+    subagents/workflows/wf_XXX/ 嵌套层,非递归 glob 会漏算。"""
     try:
-        # 递归:workflow 子agent 的 jsonl 落在 subagents/workflows/wf_XXX/ 嵌套层,
-        # 非递归 glob 只抓顶层会漏掉它们,致运行中计数(尤其其他终端跑的 workflow)漏算。
         jsonls = glob.glob(os.path.join(subagents_dir, "**", "agent-*.jsonl"),
                            recursive=True)
     except Exception:
@@ -87,8 +80,11 @@ def subagent_segment(data):
 
     # 全局:遍历 projects/<工程>/<会话>/subagents 下所有会话。
     total = 0
-    for sdir in glob.glob(os.path.join(PROJECTS_ROOT, "*", "*", "subagents")):
-        total += count_running(sdir, now)
+    try:
+        for sdir in glob.glob(os.path.join(PROJECTS_ROOT, "*", "*", "subagents")):
+            total += count_running(sdir, now)
+    except Exception:
+        pass
 
     if total == 0 and here == 0:
         return None
@@ -97,15 +93,15 @@ def subagent_segment(data):
 
 def _transcript_context_used(transcript_path):
     """从 transcript JSONL 末尾读最近一条 assistant 消息的 usage,返回当前上下文 token 数。
-    上下文填充 = input_tokens + cache_read_input_tokens + cache_creation_input_tokens
-    (即下一次请求会带上的 prompt 量)。地面真相,不依赖 statusLine 输入 schema。"""
+    上下文填充 = input_tokens + cache_read_input_tokens + cache_creation_input_tokens。
+    地面真相回退(当 statusLine 输入没给 used_percentage 时用)。"""
     if not transcript_path or not os.path.exists(transcript_path):
         return None
     try:
         with open(transcript_path, "rb") as f:
             f.seek(0, 2)
             size = f.tell()
-            f.seek(max(0, size - 65536))   # 只读末尾 64KB,够拿到最近几条消息
+            f.seek(max(0, size - 65536))   # 只读末尾 64KB
             tail = f.read().decode("utf-8", "ignore")
         last_usage = None
         for line in tail.splitlines():
@@ -129,42 +125,35 @@ def _transcript_context_used(transcript_path):
 
 
 def context_segment(data):
-    """上下文占用百分比。优先用 statusLine 输入的 context/context_window 字段,
-    缺失则解析 transcript。同时把原始输入 dump 到文件供核对字段形状。"""
-    # dump 原始输入(轻量,单文件覆写),供事后核对 statusLine 实际给了哪些字段
-    try:
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               ".statusline-input-dump.json"), "w") as f:
-            json.dump({"keys": list(data.keys()),
-                       "context": data.get("context"),
-                       "context_window": data.get("context_window"),
-                       "max_tokens": data.get("max_tokens"),
-                       "exceeds_200k_tokens": data.get("exceeds_200k_tokens")}, f)
-    except Exception:
-        pass
+    """上下文占用百分比。优先吃 CC 自带的 context_window.used_percentage
+    (CC 自己的口径,最准),缺失则解析 transcript 估算了。"""
+    pct = None
+    cw = data.get("context_window")
 
-    used = None
-    c = data.get("context")
-    if isinstance(c, dict):
-        used = c.get("used") or c.get("tokens") or c.get("input_tokens")
-    elif isinstance(c, (int, float)):
-        used = c
-    if used is None:
+    # 路径 1:CC 自带 used_percentage(权威)
+    if isinstance(cw, dict):
+        up = cw.get("used_percentage")
+        if isinstance(up, (int, float)):
+            pct = float(up)
+
+    # 路径 2:transcript 地面真相回退
+    if pct is None:
         used = _transcript_context_used(data.get("transcript_path"))
-    if not used:
+        if used:
+            window = None
+            if isinstance(cw, dict):
+                wsz = cw.get("context_window_size")
+                if isinstance(wsz, (int, float)) and wsz > 0:
+                    window = wsz
+            if window is None:
+                m = data.get("model") or {}
+                mid = str(m.get("id") or m.get("display_name") or "").lower()
+                window = 1000000 if ("1m" in mid or "opus" in mid) else 200000
+            pct = used * 100.0 / window
+
+    if pct is None:
         return None
 
-    window = None
-    cw = data.get("context_window") or data.get("max_tokens")
-    if isinstance(cw, (int, float)) and cw > 0:
-        window = cw
-    if window is None:
-        # 回退:模型名含 1m/opus 用 1M 窗口,否则 200K。近似,够用。
-        m = data.get("model") or {}
-        mid = str(m.get("id") or m.get("display_name") or "").lower()
-        window = 1000000 if ("1m" in mid or "opus" in mid) else 200000
-
-    pct = used * 100.0 / window
     col = C_CTX_OVER if pct >= 50 else (C_CTX_HI if pct >= 40 else C_CTX_OK)
     filled = max(0, min(10, round(pct / 10)))
     empty = 10 - filled
