@@ -61,7 +61,10 @@ def count_running(subagents_dir, now):
     就写入父 transcript(返回 "launched successfully"),并非完成时——用它判完成会把
     正在跑的后台 agent 误判为已结束。jsonl 改动时间对前台/后台行为一致,是唯一可靠信号。"""
     try:
-        jsonls = glob.glob(os.path.join(subagents_dir, "agent-*.jsonl"))
+        # 递归:workflow 子agent 的 jsonl 落在 subagents/workflows/wf_XXX/ 嵌套层,
+        # 非递归 glob 只抓顶层会漏掉它们,致运行中计数(尤其其他终端跑的 workflow)漏算。
+        jsonls = glob.glob(os.path.join(subagents_dir, "**", "agent-*.jsonl"),
+                           recursive=True)
     except Exception:
         return 0
     running = 0
