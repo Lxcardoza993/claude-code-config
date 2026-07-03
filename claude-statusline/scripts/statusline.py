@@ -125,15 +125,15 @@ def _transcript_context_used(transcript_path):
 
 
 def context_segment(data):
-    """上下文占用百分比。优先吃 CC 自带的 context_window.used_percentage
-    (CC 自己的口径,最准),缺失则解析 transcript 估算。
-    百分比基于模型真实窗口(1M for opus);进度条颜色阈值对齐实际压缩触发点
-    ——CC 触发 = AUTO_COMPACT_WINDOW × PCT_OVERRIDE/100,换算到真实窗口口径
-    (两者分母常不一致:压缩走 300K、显示走 1M),让色变预告压缩。"""
+    """上下文占用百分比,分母=后端真实窗口(CLAUDE_CODE_AUTO_COMPACT_WINDOW),
+    而非 CC 报的 context_window_size——经代理时常虚高(opus[1m] 报 1M,但后端
+    glm-5.2 实为 256K)。压缩实走 真实窗口×PCT_OVERRIDE/100,故显示也用真实窗口
+    做分母,数字才与压缩触发点对齐(到 override% 即该压缩)。未配真实窗口则退回
+    CC 口径(此时数字会偏小,如本机 opus 经 CPA 走 glm-5.2 会虚低 ~4×)。"""
     pct = None
     cw = data.get("context_window")
 
-    # 真实窗口:优先 CC 给的 context_window_size,否则按模型名兜底(1M for opus)。
+    # CC 报的窗口(经代理常虚高):优先 context_window_size,否则按模型名兜底。
     real_window = None
     if isinstance(cw, dict):
         wsz = cw.get("context_window_size")
@@ -144,26 +144,29 @@ def context_segment(data):
         mid = str(m.get("id") or m.get("display_name") or "").lower()
         real_window = 1000000 if ("1m" in mid or "opus" in mid) else 200000
 
-    # 路径 1:CC 自带 used_percentage(权威,基于真实窗口)
+    # 后端真实窗口:压缩实际按此触发;未配则等于 real_window(退回 CC 口径)。
+    auto_w = int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or 0) or real_window
+    auto_w = min(auto_w, real_window)   # 不能超过 CC 报的窗口
+    override = int(os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or 0) or 92
+
+    # 路径 1:CC 自带 used_percentage,从 CC 口径换算到真实窗口口径。
+    # CC 的 used_percentage = used/real_window;换成 used/auto_w 即放大 real_window/auto_w 倍。
     if isinstance(cw, dict):
         up = cw.get("used_percentage")
         if isinstance(up, (int, float)):
-            pct = float(up)
+            pct = float(up) * real_window / auto_w
 
-    # 路径 2:transcript 地面真相回退
+    # 路径 2:transcript 地面真相回退(直接用真实窗口做分母)。
     if pct is None:
         used = _transcript_context_used(data.get("transcript_path"))
         if used:
-            pct = used * 100.0 / real_window
+            pct = used * 100.0 / auto_w
 
     if pct is None:
         return None
 
-    # 压缩触发点占真实窗口的百分比 = 红色阈值;其 90% = 黄色阈值。
-    auto_w = int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or 0) or real_window
-    override = int(os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") or 0) or 92
-    auto_w = min(auto_w, real_window)
-    trigger_pct = auto_w * override / 100.0 / real_window * 100.0
+    # 真实窗口口径下,触发点就是 override% 本身;其 90% = 黄色预警。
+    trigger_pct = float(override)
     warn_pct = trigger_pct * 0.9
 
     col = C_CTX_OVER if pct >= trigger_pct else (C_CTX_HI if pct >= warn_pct else C_CTX_OK)
